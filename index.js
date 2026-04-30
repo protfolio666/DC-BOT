@@ -19,7 +19,8 @@ const client = new Client({
     GatewayIntentBits.MessageContent
   ]
 });
-require('dotenv').config(); // add at top
+
+require('dotenv').config();
 
 const TOKEN = process.env.TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
@@ -51,7 +52,7 @@ const resolveUser = async (guild, input) => {
     try { return await guild.members.fetch(mention[1]); } catch {}
   }
 
-  await guild.members.fetch(); // ✅ ensures cache
+  await guild.members.fetch();
 
   const lower = raw.toLowerCase();
 
@@ -110,50 +111,81 @@ client.on('messageCreate', async message => {
     const guild = await client.guilds.fetch(GUILD_ID);
 
     let matchNumber = 1;
+    let errorLogs = [];
 
-    for (const row of data) {
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+      const excelRow = i + 2;
 
       const round = row["Round"] || 1;
+      const freeText = row["Notes"] || "No extra info provided";
 
       const user1 = await resolveUser(guild, row["Player1 ID"]);
       const user2 = await resolveUser(guild, row["Player2 ID"]);
 
       if (!user1 || !user2) {
-        console.log("❌ User not resolved:", row);
+        const reason = `User not resolved (Player1: ${row["Player1 ID"]}, Player2: ${row["Player2 ID"]})`;
+
+        console.log(`❌ Row ${excelRow}: ${reason}`);
+
+        errorLogs.push(`❌ Row ${excelRow} → Channel NOT created | Reason: ${reason}`);
         continue;
       }
 
-      const channel = await guild.channels.create({
-        name: `R${round}-Match-${matchNumber}`,
-        type: ChannelType.GuildText,
-        parent: CATEGORY_ID,
+      let channel;
 
-        permissionOverwrites: [
-          { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-          { id: user1.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-          { id: user2.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-          { id: EXTRA_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel] }
-        ]
-      });
+      try {
+        channel = await guild.channels.create({
+          name: `R${round}-Match-${matchNumber}`,
+          type: ChannelType.GuildText,
+          parent: CATEGORY_ID,
 
-      const rowBtn = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`close_${channel.id}`)
-          .setLabel('Close Match')
-          .setStyle(ButtonStyle.Danger)
-      );
+          permissionOverwrites: [
+            { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+            { id: user1.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
+            { id: user2.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
+            { id: EXTRA_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel] }
+          ]
+        });
 
-      await channel.send({
-        content: `🏆 **Round ${round}.${matchNumber}**\nMatch: <@${user1.id}> vs <@${user2.id}>`,
-        components: [rowBtn]
-      });
+        const rowBtn = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`close_${channel.id}`)
+            .setLabel('Close Match')
+            .setStyle(ButtonStyle.Danger)
+        );
+
+        await channel.send({
+          content: `🏆 **Round ${round}.${matchNumber}**
+Match: <@${user1.id}> vs <@${user2.id}>
+
+📌 **Details:**
+${freeText}
+
+🔔 <@&${EXTRA_ROLE_ID}>`,
+          components: [rowBtn]
+        });
+
+      } catch (err) {
+        console.log(`❌ Row ${excelRow} Channel Error:`, err.message);
+
+        errorLogs.push(`❌ Row ${excelRow} → Channel NOT created | Error: ${err.message}`);
+        continue;
+      }
 
       matchNumber++;
       await new Promise(r => setTimeout(r, 800));
     }
 
     fs.unlinkSync(filePath);
-    message.reply("✅ Matches created!");
+
+    if (errorLogs.length > 0) {
+      const errorText = errorLogs.join('\n').slice(0, 1900);
+
+      await message.reply(`⚠️ Matches created with some errors:\n\n${errorText}`);
+    } else {
+      message.reply("✅ All matches created successfully!");
+    }
 
   } catch (err) {
     console.log(err);
@@ -161,33 +193,22 @@ client.on('messageCreate', async message => {
   }
 });
 
-// ---------- CLOSE + CONFIRM + TRANSCRIPT ----------
+// ---------- CLOSE + TRANSCRIPT ----------
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
-  // STEP 1: CLOSE CLICK
   if (interaction.customId.startsWith('close_')) {
 
     if (
       !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator) &&
       !interaction.member.roles.cache.has(EXTRA_ROLE_ID)
     ) {
-      return interaction.reply({
-        content: "❌ Not allowed",
-        flags: 64
-      });
+      return interaction.reply({ content: "❌ Not allowed", flags: 64 });
     }
 
     const confirmRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`confirm_${interaction.channel.id}`)
-        .setLabel('Yes')
-        .setStyle(ButtonStyle.Success),
-
-      new ButtonBuilder()
-        .setCustomId(`cancel_${interaction.channel.id}`)
-        .setLabel('No')
-        .setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`confirm_${interaction.channel.id}`).setLabel('Yes').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`cancel_${interaction.channel.id}`).setLabel('No').setStyle(ButtonStyle.Secondary)
     );
 
     return interaction.reply({
@@ -197,23 +218,15 @@ client.on('interactionCreate', async interaction => {
     });
   }
 
-  // CANCEL
   if (interaction.customId.startsWith('cancel_')) {
-    return interaction.update({
-      content: "❌ Cancelled.",
-      components: []
-    });
+    return interaction.update({ content: "❌ Cancelled.", components: [] });
   }
 
-  // CONFIRM CLOSE
   if (interaction.customId.startsWith('confirm_')) {
 
     const channel = interaction.channel;
 
-    await interaction.update({
-      content: "Closing match...",
-      components: []
-    });
+    await interaction.update({ content: "Closing match...", components: [] });
 
     let allMessages = [];
     let lastId;
@@ -248,8 +261,7 @@ client.on('interactionCreate', async interaction => {
       .reverse()
       .join('\n');
 
-    const finalTranscript =
-`Closed By: ${closedBy.tag}\n\n${content}`;
+    const finalTranscript = `Closed By: ${closedBy.tag}\n\n${content}`;
 
     const buffer = Buffer.from(finalTranscript, 'utf-8');
 
