@@ -45,17 +45,26 @@ const resolveUser = async (guild, input) => {
   return null;
 };
 
+// ✅ UPDATED: returns users + failed IDs
 const resolveMultipleUsers = async (guild, input) => {
-  if (!input) return [];
+  if (!input) return { users: [], failed: [] };
+
   const parts = input.toString().split(',');
   const users = [];
+  const failed = [];
 
   for (let part of parts) {
-    const user = await resolveUser(guild, part);
-    if (user) users.push(user);
+    const cleaned = cleanId(part);
+    const user = await resolveUser(guild, cleaned);
+
+    if (user) {
+      users.push(user);
+    } else {
+      if (cleaned) failed.push(cleaned);
+    }
   }
 
-  return users;
+  return { users, failed };
 };
 
 // ---------- EXCEL UPLOAD ----------
@@ -106,17 +115,25 @@ client.on('messageCreate', async message => {
 
       const extraTagsRaw = row["Extra Tags"] || "";
 
-      const user1 = await resolveUser(guild, row["Player1 ID"]);
-      const user2 = await resolveUser(guild, row["Player2 ID"]);
+      // resolve players
+      const team1Data = await resolveMultipleUsers(guild, row["Player1 IDs"]);
+      const team2Data = await resolveMultipleUsers(guild, row["Player2 IDs"]);
 
-      const team1Users = await resolveMultipleUsers(guild, row["Player1 IDs"]);
-      const team2Users = await resolveMultipleUsers(guild, row["Player2 IDs"]);
+      const team1Users = team1Data.users;
+      const team2Users = team2Data.users;
 
-      if (team1Users.length === 0 && user1) team1Users.push(user1);
-      if (team2Users.length === 0 && user2) team2Users.push(user2);
+      // ✅ PARTIAL FAIL LOGGING
+      if (team1Data.failed.length > 0 || team2Data.failed.length > 0) {
+        errorLogs.push(
+          `⚠️ Row ${excelRow} → Some users not found | ` +
+          `Team1 Failed: ${team1Data.failed.join(', ') || "None"} | ` +
+          `Team2 Failed: ${team2Data.failed.join(', ') || "None"}`
+        );
+      }
 
+      // ❌ FULL FAIL
       if (team1Users.length === 0 || team2Users.length === 0) {
-        errorLogs.push(`❌ Row ${excelRow} → Users not resolved`);
+        errorLogs.push(`❌ Row ${excelRow} → No valid users, channel not created`);
         continue;
       }
 
@@ -171,7 +188,7 @@ ${extraTags}`,
         });
 
       } catch (err) {
-        errorLogs.push(`❌ Row ${excelRow} → ${err.message}`);
+        errorLogs.push(`❌ Row ${excelRow} → Channel creation failed: ${err.message}`);
       }
 
       matchNumber++;
@@ -181,7 +198,7 @@ ${extraTags}`,
     fs.unlinkSync(filePath);
 
     if (errorLogs.length > 0) {
-      await message.reply(`⚠️ Matches created with errors:\n\n${errorLogs.join('\n').slice(0, 1900)}`);
+      await message.reply(`⚠️ Matches created with issues:\n\n${errorLogs.join('\n').slice(0, 1900)}`);
     } else {
       message.reply("✅ All matches created successfully!");
     }
