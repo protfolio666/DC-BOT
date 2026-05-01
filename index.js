@@ -33,50 +33,29 @@ client.once('clientReady', () => {
   console.log("Bot online");
 });
 
-// ---------- HELPER ----------
+// ---------- HELPERS ----------
 const cleanId = (value) => value?.toString().replace(/[^0-9]/g, '').trim();
 
-// ---------- USER RESOLVER ----------
 const resolveUser = async (guild, input) => {
   if (!input) return null;
-
-  const raw = input.toString().trim();
-
-  const id = cleanId(raw);
+  const id = cleanId(input);
   if (id.length >= 17) {
     try { return await guild.members.fetch(id); } catch {}
   }
-
-  const mention = raw.match(/^<@!?(\d+)>$/);
-  if (mention) {
-    try { return await guild.members.fetch(mention[1]); } catch {}
-  }
-
-  await guild.members.fetch();
-
-  const lower = raw.toLowerCase();
-
-  let member = guild.members.cache.find(m =>
-    m.user.username.toLowerCase() === lower ||
-    m.user.globalName?.toLowerCase() === lower ||
-    m.nickname?.toLowerCase() === lower
-  );
-
-  if (member) return member;
-
-  const tagMatch = raw.match(/^(.+)#(\d{4})$/);
-  if (tagMatch) {
-    const [_, name, disc] = tagMatch;
-
-    member = guild.members.cache.find(m =>
-      m.user.username.toLowerCase() === name.toLowerCase() &&
-      m.user.discriminator === disc
-    );
-
-    if (member) return member;
-  }
-
   return null;
+};
+
+const resolveMultipleUsers = async (guild, input) => {
+  if (!input) return [];
+  const parts = input.toString().split(',');
+  const users = [];
+
+  for (let part of parts) {
+    const user = await resolveUser(guild, part);
+    if (user) users.push(user);
+  }
+
+  return users;
 };
 
 // ---------- EXCEL UPLOAD ----------
@@ -118,35 +97,57 @@ client.on('messageCreate', async message => {
       const excelRow = i + 2;
 
       const round = row["Round"] || 1;
-      const freeText = row["Notes"] || "No extra info provided";
+
+      const team1Name = row["Team Name 1"] || "Team A";
+      const team2Name = row["Team Name 2"] || "Team B";
+
+      const notes1 = row["Notes"] || "No extra info provided";
+      const notes2 = row["Extra Notes"] || "";
+
+      const extraTagsRaw = row["Extra Tags"] || "";
 
       const user1 = await resolveUser(guild, row["Player1 ID"]);
       const user2 = await resolveUser(guild, row["Player2 ID"]);
 
-      if (!user1 || !user2) {
-        const reason = `User not resolved (Player1: ${row["Player1 ID"]}, Player2: ${row["Player2 ID"]})`;
+      const team1Users = await resolveMultipleUsers(guild, row["Player1 IDs"]);
+      const team2Users = await resolveMultipleUsers(guild, row["Player2 IDs"]);
 
-        console.log(`❌ Row ${excelRow}: ${reason}`);
+      if (team1Users.length === 0 && user1) team1Users.push(user1);
+      if (team2Users.length === 0 && user2) team2Users.push(user2);
 
-        errorLogs.push(`❌ Row ${excelRow} → Channel NOT created | Reason: ${reason}`);
+      if (team1Users.length === 0 || team2Users.length === 0) {
+        errorLogs.push(`❌ Row ${excelRow} → Users not resolved`);
         continue;
       }
 
-      let channel;
-
       try {
-        channel = await guild.channels.create({
-          name: `R${round}-Match-${matchNumber}`,
+        const channel = await guild.channels.create({
+          name: `round-${round}-match-${matchNumber}`,
           type: ChannelType.GuildText,
           parent: CATEGORY_ID,
 
           permissionOverwrites: [
             { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-            { id: user1.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-            { id: user2.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
+            ...team1Users.map(u => ({
+              id: u.id,
+              allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages]
+            })),
+            ...team2Users.map(u => ({
+              id: u.id,
+              allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages]
+            })),
             { id: EXTRA_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel] }
           ]
         });
+
+        const team1Mentions = team1Users.map(u => `<@${u.id}>`).join(' ');
+        const team2Mentions = team2Users.map(u => `<@${u.id}>`).join(' ');
+
+        const extraTags = extraTagsRaw
+          .toString()
+          .split(',')
+          .filter(x => x.trim() !== "")
+          .map(id => `<@${cleanId(id)}>`).join(' ');
 
         const rowBtn = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
@@ -156,21 +157,21 @@ client.on('messageCreate', async message => {
         );
 
         await channel.send({
-          content: `🏆 **Round ${round}.${matchNumber}**
-Match: <@${user1.id}> vs <@${user2.id}>
+          content: `🏆 **Round ${round} - Match ${matchNumber}**
+**${team1Name} vs ${team2Name}**
 
-📌 **Details:**
-${freeText}
+👥 ${team1Mentions} vs ${team2Mentions}
 
-🔔 <@&${EXTRA_ROLE_ID}>`,
+📌 ${notes1}
+📌 ${notes2}
+
+🔔 <@&${EXTRA_ROLE_ID}>
+${extraTags}`,
           components: [rowBtn]
         });
 
       } catch (err) {
-        console.log(`❌ Row ${excelRow} Channel Error:`, err.message);
-
-        errorLogs.push(`❌ Row ${excelRow} → Channel NOT created | Error: ${err.message}`);
-        continue;
+        errorLogs.push(`❌ Row ${excelRow} → ${err.message}`);
       }
 
       matchNumber++;
@@ -180,9 +181,7 @@ ${freeText}
     fs.unlinkSync(filePath);
 
     if (errorLogs.length > 0) {
-      const errorText = errorLogs.join('\n').slice(0, 1900);
-
-      await message.reply(`⚠️ Matches created with some errors:\n\n${errorText}`);
+      await message.reply(`⚠️ Matches created with errors:\n\n${errorLogs.join('\n').slice(0, 1900)}`);
     } else {
       message.reply("✅ All matches created successfully!");
     }
@@ -193,7 +192,7 @@ ${freeText}
   }
 });
 
-// ---------- CLOSE + TRANSCRIPT ----------
+// ---------- CLOSE + TRANSCRIPT (UNCHANGED) ----------
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
